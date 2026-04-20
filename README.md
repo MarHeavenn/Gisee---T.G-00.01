@@ -15,3 +15,4 @@ La funcionalidad de Gisee es ser una mascota amistosa la cual mitigue la soledad
 2. Pegar en el navegador http://127.0.0.1:8000/docs
 - Ahí verás el Swagger UI — la interfaz interactiva donde puedes chatear con Gisee
 3. Haz clic en POST /chat → "Try it out" → escribe tu mensaje → "Execute".
+- Reemplaza el texto en el cuadro donde dice "string" con tu mensaje real (EJEMPLO: "MensajeUsuario": "hola, me siento triste hoy")
