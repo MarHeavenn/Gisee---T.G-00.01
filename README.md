@@ -8,3 +8,10 @@ La funcionalidad de Gisee es ser una mascota amistosa la cual mitigue la soledad
 - develop       ← integración general
 - feature/software-vscode
 - feature/hardware-arduino
+
+# Instrucciones
+1. uvicorn main:app --reload
+- Si dice "Application startup complete." significa que el servidor arranco correctamente
+2. Pegar en el navegador http://127.0.0.1:8000/docs
+- Ahí verás el Swagger UI — la interfaz interactiva donde puedes chatear con Gisee
+3. Haz clic en POST /chat → "Try it out" → escribe tu mensaje → "Execute".
