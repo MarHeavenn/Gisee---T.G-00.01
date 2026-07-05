@@ -4,16 +4,17 @@ from fastapi import FastAPI, HTTPException
 # BaseModel es de Pydantic — definir la "forma" de los datos que entran y salen del endpoint (como un contrato de datos)
 from pydantic import BaseModel
 
-# ChatOpenAI es el wrapper de LangChain compatible con cualquier API estilo OpenAI
-# xAI (Grok) usa el mismo formato, por eso reutilizamos este wrapper apuntando a otra URL
-from langchain_openai import ChatOpenAI
+# ChatGroq es el wrapper de LangChain compatible con la API de Groq
+from langchain_groq import ChatGroq
 
 # ChatPromptTemplate permite construir el prompt con roles:
 # "system" (personalidad del bot) y "human" (mensaje del usuario)
-from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 
 # StrOutputParser convierte la respuesta de Grok (un objeto complejo) => string plano y legible
 from langchain_core.output_parsers import StrOutputParser
+
+from langchain_core.messages import HumanMessage, AIMessage
 
 # load_dotenv lee el archivo .env y carga las variables de entorno
 # para que os.getenv() las pueda encontrar en el código
@@ -27,16 +28,19 @@ import os
 # queden disponibles en este proceso
 load_dotenv()
 
+# importamos las funciones de memoria y RAG
+from memory import guardar_en_memoria, buscar_en_memoria
+from rag import buscar_contexto
+
 # ------- LLM -------
 
 # Le decimos a LangChain qué modelo usar y dónde encontrarlo
 # model: nombre exacto del modelo de xAI
 # api_key: clave del .env
 # base_url: apunta a los servidores de xAI en lugar de OpenAI
-llm = ChatOpenAI(
-    model="grok-3",
-    api_key=os.getenv("GROK_API_KEY"),
-    base_url="https://api.x.ai/v1",
+llm = ChatGroq(
+    model="llama-3.1-8b-instant",
+    api_key=os.getenv("GROQ_API_KEY"),
 )
 
 # ------- Prompt -------
@@ -45,8 +49,27 @@ llm = ChatOpenAI(
 # "system" -> instrucciones para el bot (personalidad de Gisee)
 # "human" -> mensaje del usuario
 # {MensajeUsuario} -> placeholder que se rellena en tiempo de ejecución
+
+# el prompt ahora tiene tres fuentes de información:
+# 1. la personalidad de Gisee
+# 2. contexto de PDFs y memoria anterior (se inyecta en system)
+# 3. el historial de mensajes de esta sesión
+# 4. el mensaje actual del usuario
 prompt = ChatPromptTemplate.from_messages([
-    ("system", "Eres Gisee, se pronuncia yisi, eres un asistente emocional divertido, chistoso, entusiasta, amable, amistoso, respetuoso y empático, responde siempre en español diciendo algo para hacer sentir mucho mejor al usuario"),
+    ("system", """Eres Gisee, se pronuncia yisi, eres un asistente emocional 
+    divertido, chistoso, entusiasta, amable, amistoso, respetuoso y empático, 
+    responde siempre en español diciendo algo para hacer sentir mucho mejor al usuario.
+    
+    Usa esta información de contexto para responder mejor:
+    
+    Información de documentos especializados:
+    {contexto_pdfs}
+    
+    Conversaciones anteriores relevantes con este usuario:
+    {memoria_anterior}
+    """),
+    # aquí se inyecta el historial de mensajes de esta sesión
+    MessagesPlaceholder(variable_name="historial"),
     ("human", "{MensajeUsuario}"),
 ])
 
@@ -66,11 +89,16 @@ app = FastAPI(
     version="1.0.0",
 )
 
+# historial en memoria RAM para la sesión activa
+# guarda los últimos mensajes como objetos HumanMessage y AIMessage
+historiales = {}
+
 # ------- Schemas -------
 # ChatRequest -> datos a recibir en el Endpoint
 # Pydantic valida automáticamente que el JSON tenga este campo
 # Si el cliente manda algo incorrecto, FastAPI responde 422 automáticamente
 class ChatRequest(BaseModel):
+    session_id: str  # para identificar la sesión y su historial
     MensajeUsuario: str  # manda un campo de tipo string
 
 # ChatResponse -> datos a enviar desde el Endpoint
@@ -84,21 +112,45 @@ class ChatResponse(BaseModel):
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
     try:
-        # request.MensajeUsuario -> texto que mandó el usuario
-        # chain.invoke() -> ejecuta tres pasos: 1.prompt 2.llm 3.parser
-        # y devuelve un string con la respuesta de Grok
-        respuesta_bot = chain.invoke({"MensajeUsuario": request.MensajeUsuario})
+        # 1. trae o crea el historial RAM de esta sesión
+        if request.session_id not in historiales:
+            historiales[request.session_id] = []
+        historial = historiales[request.session_id]
 
-        # Empaqueta el string en el schema ChatResponse y lo retorna
-        # FastAPI lo convierte a JSON automáticamente
-        return ChatResponse(respuesta_bot=respuesta_bot)
+        # 2. busca fragmentos relevantes en los PDFs
+        contexto_pdfs = buscar_contexto(request.MensajeUsuario)
+
+        # 3. busca mensajes anteriores relevantes en ChromaDB
+        memoria_anterior = buscar_en_memoria(
+            request.session_id, #Dato 1
+            request.MensajeUsuario #Dato 2
+        )
+
+        # 4. invoca la cadena con todo el contexto junto
+        respuesta_bot = chain.invoke({
+            "historial": historial,
+            "MensajeUsuario": request.MensajeUsuario,
+            "contexto_pdfs": contexto_pdfs,
+            "memoria_anterior": memoria_anterior,
+        })
+
+        # 5. guarda el mensaje y la respuesta en el historial RAM
+        historial.append(HumanMessage(content=request.MensajeUsuario))
+        historial.append(AIMessage(content=respuesta_bot))
+
+        # 6. guarda el mensaje del usuario en ChromaDB para memoria futura
+        guardar_en_memoria(request.session_id, request.MensajeUsuario)
+        # guarda también la respuesta para que Gisee recuerde lo que dijo
+        guardar_en_memoria(request.session_id, f"Gisee respondió: {respuesta_bot}")
+
+        return ChatResponse(respuesta_bot=respuesta_bot)        
 
     except Exception as e:
         # Si algo falla (cuota, red, etc.), responde con un mensaje amable
         # en lugar de explotar con un error 500
         raise HTTPException(
             status_code=503,
-            detail="Gisee no está disponible en este momento. Intenta más tarde."
+            detail=f"Gisee no está disponible: {str(e)}"
         )
 
 if __name__ == "__main__":
