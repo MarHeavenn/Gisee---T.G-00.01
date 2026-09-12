@@ -24,6 +24,8 @@ from dotenv import load_dotenv
 # lo usamos para leer XAI_API_KEY desde el .env
 import os
 
+from evaluator import evaluar_respuesta
+
 # Ejecuta load_dotenv() para que las variables del .env
 # queden disponibles en este proceso
 load_dotenv()
@@ -39,7 +41,7 @@ from rag import buscar_contexto
 # api_key: clave del .env
 # base_url: apunta a los servidores de xAI en lugar de OpenAI
 llm = ChatGroq(
-    model="llama-3.1-8b-instant",
+    model="qwen/qwen3.8-27b",  # modelo de xAI
     api_key=os.getenv("GROQ_API_KEY"),
 )
 
@@ -85,7 +87,7 @@ chain = prompt | llm | StrOutputParser()
 # title, description y version aparecen en la página de Swagger (/docs)
 app = FastAPI(
     title="Asistente Emocional Gisee",
-    description="Un asistente emocional divertido y empático con FastAPI + LangChain + Grok",
+    description="Un asistente emocional divertido y empático con FastAPI + LangChain + Groq.",
     version="1.0.0",
 )
 
@@ -142,8 +144,9 @@ def chat(request: ChatRequest):
         guardar_en_memoria(request.session_id, request.MensajeUsuario)
         # guarda también la respuesta para que Gisee recuerde lo que dijo
         guardar_en_memoria(request.session_id, f"Gisee respondió: {respuesta_bot}")
-
-        return ChatResponse(respuesta_bot=respuesta_bot)        
+        # 7. evalua al respuesta antes de enviarla 
+        respuesta_evaluada = evaluar_respuesta(request.MensajeUsuario, respuesta_bot)
+        return ChatResponse(respuesta_bot=respuesta_evaluada)   
 
     except Exception as e:
         # Si algo falla (cuota, red, etc.), responde con un mensaje amable
