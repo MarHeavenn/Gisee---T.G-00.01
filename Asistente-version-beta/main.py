@@ -24,8 +24,20 @@ from dotenv import load_dotenv
 # lo usamos para leer XAI_API_KEY desde el .env
 import os
 
-from evaluator import evaluar_respuesta
+###################################
 
+from evaluator import evaluar_respuesta
+from fastapi.responses import HTMLResponse
+
+from fastapi.responses import StreamingResponse
+from gtts import gTTS
+import io
+
+from fastapi import UploadFile, File
+import tempfile
+from groq import Groq
+import edge_tts
+    
 # Ejecuta load_dotenv() para que las variables del .env
 # queden disponibles en este proceso
 load_dotenv()
@@ -155,6 +167,61 @@ def chat(request: ChatRequest):
             status_code=503,
             detail=f"Gisee no está disponible: {str(e)}"
         )
+    
+# endpoint que recibe audio y lo transcribe con Whisper de Groq
+@app.post("/transcribir")
+async def transcribir(audio: UploadFile = File(...)):
+    cliente_groq = Groq(api_key=os.getenv("GROQ_API_KEY"))
+    
+    # guarda el audio temporalmente en disco
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".webm") as tmp:
+        contenido = await audio.read()
+        tmp.write(contenido)
+        tmp_path = tmp.name
+    
+    try:
+        # envía el audio a Whisper de Groq para transcribirlo
+        with open(tmp_path, "rb") as f:
+            transcripcion = cliente_groq.audio.transcriptions.create(
+                model="whisper-large-v3",
+                file=f,
+                language="es",
+            )
+        return {"texto": transcripcion.text}
+    finally:
+        # borra el archivo temporal
+        os.unlink(tmp_path)
+
+# endpoint que convierte texto a audio con gTTS y lo devuelve al navegador
+# endpoint que convierte texto a audio con Edge TTS (voz de hombre colombiano)
+@app.post("/hablar")
+async def hablar(request: dict):
+    texto = request.get("texto", "")
+    
+    # es-CO-GonzaloNeural = voz de hombre colombiano de Microsoft
+    # puedes cambiarla por es-ES-AlvaroNeural (España) o es-MX-JorgeNeural (México)
+    comunicar = edge_tts.Communicate(texto, voice="es-CO-GonzaloNeural")
+    
+    # guarda el audio en memoria RAM
+    audio_buffer = io.BytesIO()
+    
+    # genera el audio fragmento por fragmento y lo va guardando
+    async for chunk in comunicar.stream():
+        if chunk["type"] == "audio":
+            audio_buffer.write(chunk["data"])
+    
+    audio_buffer.seek(0)
+    
+    # devuelve el audio como stream al navegador
+    return StreamingResponse(
+        audio_buffer,
+        media_type="audio/mpeg"
+    )
+
+@app.get("/", response_class=HTMLResponse)
+async def get_chat_page():
+    with open("chat.html", "r", encoding="utf-8") as f:
+        return f.read()
 
 if __name__ == "__main__":
     import uvicorn

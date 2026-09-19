@@ -1,0 +1,287 @@
+<!doctype html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Gisee - Asistente Emocional</title>
+    <style>
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+
+      body {
+        font-family: "Segoe UI", sans-serif;
+        background: #1a1a2e;
+        color: #eee;
+        height: 100vh;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        justify-content: center;
+      }
+
+      h1 {
+        font-size: 4rem;
+        color: #e9b545;
+        margin-bottom: 10px;
+      }
+
+      #subtitulo {
+        color: #aaa;
+        margin-bottom: 30px;
+        font-size: 0.95rem;
+      }
+
+      #chat-box {
+        width: 600px;
+        max-width: 90vw;
+        height: 350px;
+        background: #16213e;
+        border-radius: 16px;
+        padding: 20px;
+        overflow-y: auto;
+        margin-bottom: 20px;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .mensaje {
+        padding: 10px 15px;
+        border-radius: 12px;
+        max-width: 80%;
+        font-size: 0.95rem;
+        line-height: 1.5;
+      }
+
+      .mensaje.usuario {
+        background: #e94560;
+        align-self: flex-end;
+        color: white;
+      }
+
+      .mensaje.gisee {
+        background: #0f3460;
+        align-self: flex-start;
+        color: #eee;
+      }
+
+      #estado {
+        color: #aaa;
+        font-size: 0.85rem;
+        margin-bottom: 15px;
+        height: 20px;
+      }
+
+      #boton-mic {
+        width: 80px;
+        height: 80px;
+        border-radius: 50%;
+        background: #e9a745;
+        border: none;
+        cursor: pointer;
+        font-size: 2rem;
+        color: white;
+        transition: all 0.2s;
+        box-shadow: 0 4px 20px rgba(233, 69, 96, 0.4);
+      }
+
+      #boton-mic:hover {
+        transform: scale(1.1);
+      }
+
+      #boton-mic.escuchando {
+        background: #4caf50;
+        animation: pulso 1s infinite;
+      }
+
+      @keyframes pulso {
+        0% {
+          box-shadow: 0 0 0 0 rgba(76, 175, 80, 0.4);
+        }
+        70% {
+          box-shadow: 0 0 0 15px rgba(76, 175, 80, 0);
+        }
+        100% {
+          box-shadow: 0 0 0 0 rgba(76, 175, 80, 0);
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Gisee 🐹</h1>
+    <p id="subtitulo">
+      Hola, soy Gisee, tu asistente emocional. Presiona el botón y cuéntame cómo
+      te sientes.
+    </p>
+
+    <div id="chat-box"></div>
+
+    <div id="estado">Presiona el botón para hablar</div>
+
+    <button id="boton-mic" onclick="toggleMic()">🎤</button>
+
+    <script>
+      const SESSION_ID = "sesion_" + Math.random().toString(36).substr(2, 9);
+      let vozSeleccionada = null;
+      let grabando = false;
+      let mediaRecorder = null;
+      let chunksAudio = [];
+
+      const boton = document.getElementById("boton-mic");
+
+      // ─── BOTÓN DE MICRÓFONO ───────────────────────────────────────
+      async function toggleMic() {
+        if (window.speechSynthesis.speaking) return;
+
+        if (!grabando) {
+          await iniciarGrabacion();
+        } else {
+          detenerGrabacion();
+        }
+      }
+
+      // ─── INICIAR GRABACIÓN ────────────────────────────────────────
+      async function iniciarGrabacion() {
+        try {
+          // pide permiso al navegador para usar el micrófono
+          const stream = await navigator.mediaDevices.getUserMedia({
+            audio: true,
+          });
+
+          mediaRecorder = new MediaRecorder(stream);
+          chunksAudio = [];
+
+          // guarda cada fragmento de audio
+          mediaRecorder.ondataavailable = (e) => {
+            if (e.data.size > 0) chunksAudio.push(e.data);
+          };
+
+          // cuando para la grabación, envía el audio a Whisper
+          mediaRecorder.onstop = async () => {
+            const blob = new Blob(chunksAudio, { type: "audio/webm" });
+            await transcribirYEnviar(blob);
+            // detiene el micrófono completamente
+            stream.getTracks().forEach((t) => t.stop());
+          };
+
+          mediaRecorder.start();
+          grabando = true;
+          boton.classList.add("escuchando");
+          boton.textContent = "⏹";
+          setEstado("Escuchando...");
+        } catch (error) {
+          setEstado("Error: no se pudo acceder al micrófono");
+          console.error(error);
+        }
+      }
+
+      // ─── DETENER GRABACIÓN ────────────────────────────────────────
+      function detenerGrabacion() {
+        if (mediaRecorder && mediaRecorder.state !== "inactive") {
+          mediaRecorder.stop();
+        }
+        grabando = false;
+        boton.classList.remove("escuchando");
+        boton.textContent = "🎤";
+        setEstado("Procesando audio...");
+      }
+
+      // ─── TRANSCRIBIR CON WHISPER Y ENVIAR A GISEE ─────────────────
+      async function transcribirYEnviar(blob) {
+        try {
+          // prepara el audio para enviarlo al endpoint /transcribir
+          const formData = new FormData();
+          formData.append("audio", blob, "audio.webm");
+
+          // envía el audio a FastAPI que lo manda a Whisper
+          const respTranscripcion = await fetch("/transcribir", {
+            method: "POST",
+            body: formData,
+          });
+
+          const datosTranscripcion = await respTranscripcion.json();
+          const textoUsuario = datosTranscripcion.texto;
+
+          if (!textoUsuario || textoUsuario.trim() === "") {
+            setEstado("No escuché nada, intenta de nuevo");
+            return;
+          }
+
+          mostrarMensaje(textoUsuario, "usuario");
+          setEstado("Gisee está pensando...");
+          await enviarAGisee(textoUsuario);
+        } catch (error) {
+          setEstado("Error al transcribir el audio");
+          console.error(error);
+        }
+      }
+
+      // ─── ENVIAR MENSAJE A LA API ──────────────────────────────────
+      async function enviarAGisee(mensaje) {
+        try {
+          const respuesta = await fetch("/chat", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              session_id: SESSION_ID,
+              MensajeUsuario: mensaje,
+            }),
+          });
+
+          const datos = await respuesta.json();
+          const textoGisee = datos.respuesta_bot;
+
+          mostrarMensaje(textoGisee, "gisee");
+          hablar(textoGisee);
+        } catch (error) {
+          setEstado("Error al conectar con Gisee");
+          console.error(error);
+        }
+      }
+
+      // ─── TEXT TO SPEECH ───────────────────────────────────────────
+      // ─── TEXT TO SPEECH con gTTS ──────────────────────────────────
+      async function hablar(texto) {
+        try {
+          setEstado("Gisee está hablando...");
+
+          // le pide al backend que genere el audio con gTTS
+          const respuesta = await fetch("/hablar", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ texto: texto }),
+          });
+
+          // convierte la respuesta en un blob de audio
+          const audioBlob = await respuesta.blob();
+          const audioUrl = URL.createObjectURL(audioBlob);
+
+          // crea un elemento de audio y lo reproduce
+          const audio = new Audio(audioUrl);
+          audio.onended = () => setEstado("Presiona el botón para hablar");
+          audio.play();
+        } catch (error) {
+          setEstado("Error al reproducir audio");
+          console.error(error);
+        }
+      }
+
+      // ─── UTILIDADES ───────────────────────────────────────────────
+      function mostrarMensaje(texto, quien) {
+        const chatBox = document.getElementById("chat-box");
+        const div = document.createElement("div");
+        div.classList.add("mensaje", quien);
+        div.textContent = texto;
+        chatBox.appendChild(div);
+        chatBox.scrollTop = chatBox.scrollHeight;
+      }
+
+      function setEstado(texto) {
+        document.getElementById("estado").textContent = texto;
+      }
+    </script>
+  </body>
+</html>
