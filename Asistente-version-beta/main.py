@@ -36,7 +36,11 @@ import io
 from fastapi import UploadFile, File
 import tempfile
 from groq import Groq
-import edge_tts
+from tts_utils import limpiar_texto_para_tts
+from fastapi import Form, Response
+from pydub import AudioSegment
+
+from rutas_esp32 import router as esp32_router, inicializar_router
     
 # Ejecuta load_dotenv() para que las variables del .env
 # queden disponibles en este proceso
@@ -70,11 +74,15 @@ llm = ChatGroq(
 # 3. el historial de mensajes de esta sesión
 # 4. el mensaje actual del usuario
 prompt = ChatPromptTemplate.from_messages([
-    ("system", """Eres Gisee, se pronuncia yisi, eres un asistente emocional 
-    divertido, chistoso, entusiasta, amable, amistoso, respetuoso y empático, 
-    responde siempre en español diciendo algo para hacer sentir mucho mejor al usuario.
+    ("system", """Eres Gisee, un asistente emocional masculino. 
+    Eres divertido, chistoso, entusiasta, amable, amistoso, respetuoso y empático.
+    Responde siempre en español diciendo algo para hacer sentir mucho mejor al usuario.
     
-    Usa esta información de contexto para responder mejor:
+    REGLAS ESTRICTAS: 
+    1. No uses ningún emoji, emoticono o símbolo especial. 
+    2. Usa signos de exclamación (¡!) y puntos suspensivos (...) para darle emoción y pausas naturales a tus frases, ya que serás leído en voz alta.
+
+    REGLA DE ORATORIA: Escribe en oraciones cortas. Usa abundantes comas, puntos y signos de exclamación (¡!) para marcar pausas y dar énfasis emocional. Nunca escribas párrafos largos sin pausas.
     
     Información de documentos especializados:
     {contexto_pdfs}
@@ -82,7 +90,6 @@ prompt = ChatPromptTemplate.from_messages([
     Conversaciones anteriores relevantes con este usuario:
     {memoria_anterior}
     """),
-    # aquí se inyecta el historial de mensajes de esta sesión
     MessagesPlaceholder(variable_name="historial"),
     ("human", "{MensajeUsuario}"),
 ])
@@ -196,12 +203,22 @@ async def transcribir(audio: UploadFile = File(...)):
 # endpoint que convierte texto a audio con Edge TTS (voz de hombre colombiano)
 @app.post("/hablar")
 async def hablar(request: dict):
+    import edge_tts
+
     texto = request.get("texto", "")
-    
+    # print temporal para ver qué texto llega al TTS
+    print(f"[TTS] Texto: '{texto}'")
+     # limpia el texto antes de enviarlo al TTS
+    texto = limpiar_texto_para_tts(texto)
     # es-CO-GonzaloNeural = voz de hombre colombiano de Microsoft
     # puedes cambiarla por es-ES-AlvaroNeural (España) o es-MX-JorgeNeural (México)
-    comunicar = edge_tts.Communicate(texto, voice="es-CO-GonzaloNeural")
-    
+    comunicar = edge_tts.Communicate(
+        text=texto, 
+        voice="es-CO-GonzaloNeural", 
+        rate="+5%",   # Habla un pelín más rápido para darle dinamismo
+        pitch="+30Hz" # Sube el tono para que suene más entusiasta y menos plano
+    )
+
     # guarda el audio en memoria RAM
     audio_buffer = io.BytesIO()
     
@@ -222,7 +239,16 @@ async def hablar(request: dict):
 async def get_chat_page():
     with open("chat.html", "r", encoding="utf-8") as f:
         return f.read()
+    
+# Importar el router del nuevo archivo
+from rutas_esp32 import router as router_esp32, inicializar_router
+
+# Pasarle la cadena y el historial al router para que los pueda usar
+inicializar_router(chain, historiales)
+
+# Conectar el router a la app principal de FastAPI
+app.include_router(router_esp32)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000)
