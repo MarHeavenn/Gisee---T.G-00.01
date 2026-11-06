@@ -41,6 +41,9 @@ from fastapi import Form, Response
 from pydub import AudioSegment
 
 from rutas_esp32 import router as esp32_router, inicializar_router
+
+# Supervisión: captura de logs, historial de peticiones y panel en /panel
+import supervision
     
 # Ejecuta load_dotenv() para que las variables del .env
 # queden disponibles en este proceso
@@ -59,6 +62,11 @@ from rag import buscar_contexto
 llm = ChatGroq(
     model="qwen/qwen3.8-27b",  # modelo de xAI
     api_key=os.getenv("GROQ_API_KEY"),
+    # El plan gratuito de Groq limita los tokens de salida por minuto (OTPM).
+    # Sin tope, LangChain pide ~1100 tokens de salida y Groq responde 429
+    # ("Request too large ... Limit 1000"). Con 350 sobra para una respuesta
+    # hablada y el request siempre entra en el límite.
+    max_tokens=350,
 )
 
 # ------- Prompt -------
@@ -74,19 +82,47 @@ llm = ChatGroq(
 # 3. el historial de mensajes de esta sesión
 # 4. el mensaje actual del usuario
 prompt = ChatPromptTemplate.from_messages([
-    ("system", """Eres Gisee, un asistente emocional masculino. 
+    ("system", """Eres Gisee, un asistente emocional masculino.
     Eres divertido, chistoso, entusiasta, amable, amistoso, respetuoso y empático.
     Responde siempre en español diciendo algo para hacer sentir mucho mejor al usuario.
-    
-    REGLAS ESTRICTAS: 
-    1. No uses ningún emoji, emoticono o símbolo especial. 
-    2. Usa signos de exclamación (¡!) y puntos suspensivos (...) para darle emoción y pausas naturales a tus frases, ya que serás leído en voz alta.
 
-    REGLA DE ORATORIA: Escribe en oraciones cortas. Usa abundantes comas, puntos y signos de exclamación (¡!) para marcar pausas y dar énfasis emocional. Nunca escribas párrafos largos sin pausas.
-    
+    IDENTIDAD Y GÉNERO (muy importante):
+    - Tu nombre es Gisee y eres HOMBRE. Habla siempre de ti en masculino:
+      "estoy listo", "encantado", "preparado", "yo mismo". Nunca uses formas
+      femeninas para referirte a ti.
+    - El usuario NO se llama Gisee. No lo llames así ni inventes su nombre.
+    - Di tu nombre solo en el saludo inicial o si el usuario pregunta
+      explícitamente cómo te llamas o quién eres. En el resto de la
+      conversación no repitas tu nombre.
+
+    CÓMO CONVERSAR:
+    - Si es el primer mensaje o un saludo, preséntate brevemente y pregúntale
+      cómo se siente hoy; invítalo a contar lo que le pasa.
+    - Escucha y responde a lo que la persona dice. No cambies de tema ni
+      repitas la misma pregunta.
+    - Si no sabes algo, el tema está fuera de tu alcance, o es un tema
+      delicado de salud mental que no puedes manejar: no inventes. Responde
+      con amabilidad algo como "Vaya, me tomas por sorpresa. Sobre eso no sé,
+      pero puedes contarme más; estoy aquí para escucharte."
+    - Si la persona menciona autolesión, suicidio o estar en peligro:
+      responde con calidez y sin juzgar. Valida lo que siente, anímalo a
+      mantenerse a salvo y a alejarse de cualquier medio para hacerse daño,
+      sugiérele avisar a alguien de confianza y llamar a emergencias (123) o
+      a la línea de salud mental (106). No lo dejes solo en la conversación.
+    - No inventes datos, estadísticas ni citas.
+
+    REGLAS ESTRICTAS:
+    1. No uses ningún emoji, emoticono o símbolo especial.
+    2. Usa signos de exclamación (¡!) y puntos suspensivos (...) para darle
+       emoción y pausas naturales a tus frases, ya que serás leído en voz alta.
+
+    REGLA DE ORATORIA: Escribe en oraciones cortas. Usa abundantes comas,
+    puntos y signos de exclamación (¡!) para marcar pausas y dar énfasis
+    emocional. Nunca escribas párrafos largos sin pausas.
+
     Información de documentos especializados:
     {contexto_pdfs}
-    
+
     Conversaciones anteriores relevantes con este usuario:
     {memoria_anterior}
     """),
@@ -114,6 +150,16 @@ app = FastAPI(
 # guarda los últimos mensajes como objetos HumanMessage y AIMessage
 historiales = {}
 
+# Enganchamos la captura de logs lo antes posible: así el panel y el archivo
+# logs/gisee.log recogen también los mensajes de arranque de uvicorn.
+supervision.instalar_captura()
+app.middleware("http")(supervision.registrar_peticion)
+app.include_router(supervision.router)
+
+# máximo de mensajes que se conservan por sesión (evita que la RAM y el
+# prompt crezcan sin límite en conversaciones largas)
+MAX_HISTORIAL = 20
+
 # ------- Schemas -------
 # ChatRequest -> datos a recibir en el Endpoint
 # Pydantic valida automáticamente que el JSON tenga este campo
@@ -137,6 +183,10 @@ def chat(request: ChatRequest):
         if request.session_id not in historiales:
             historiales[request.session_id] = []
         historial = historiales[request.session_id]
+
+        # conserva solo los últimos mensajes (pares usuario/Gisee)
+        if len(historial) > MAX_HISTORIAL:
+            del historial[:-MAX_HISTORIAL]
 
         # 2. busca fragmentos relevantes en los PDFs
         contexto_pdfs = buscar_contexto(request.MensajeUsuario)
@@ -190,7 +240,7 @@ async def transcribir(audio: UploadFile = File(...)):
         # envía el audio a Whisper de Groq para transcribirlo
         with open(tmp_path, "rb") as f:
             transcripcion = cliente_groq.audio.transcriptions.create(
-                model="whisper-large-v3",
+                model="whisper-large-v3-turbo",
                 file=f,
                 language="es",
             )
@@ -235,19 +285,112 @@ async def hablar(request: dict):
         media_type="audio/mpeg"
     )
 
+@app.get("/health")
+async def health():
+    """Sonda de vida: la usan el navegador, scripts y la propia placa para
+    comprobar que el backend responde antes de mandar audio."""
+    return {"estado": "ok", "servicio": "gisee"}
+
+
+# ------- Compatibilidad con clientes tipo OpenAI -------
+# Algunas herramientas (extensiones del editor, clientes de chat) sondean
+# /v1/models antes de hablar. Sin esto el backend devolvía 404 y ensuciaba
+# la consola aunque la app real no los use.
+
+@app.get("/v1/models")
+async def v1_models():
+    return {
+        "object": "list",
+        "data": [
+            {
+                "id": "gisee",
+                "object": "model",
+                "created": 0,
+                "owned_by": "gisee",
+            }
+        ],
+    }
+
+
+@app.post("/v1/chat/completions")
+async def v1_chat_completions(peticion: dict):
+    """Adaptador mínimo compatible con la API de OpenAI.
+
+    Reutiliza el mismo cerebro (RAG + memoria + juez) que usa el hardware.
+    """
+    import json as _json
+    import time as _time
+
+    from fastapi.concurrency import run_in_threadpool
+    from rutas_esp32 import _responder_gisee
+    from groq import RateLimitError
+
+    mensajes = peticion.get("messages") or []
+    texto = ""
+    for m in reversed(mensajes):
+        if m.get("role") == "user":
+            contenido = m.get("content", "")
+            texto = contenido if isinstance(contenido, str) else str(contenido)
+            break
+
+    if not texto.strip():
+        raise HTTPException(status_code=400, detail="Falta el mensaje del usuario")
+
+    try:
+        respuesta = await run_in_threadpool(_responder_gisee, "v1", texto)
+    except RateLimitError:
+        raise HTTPException(status_code=429, detail="Límite de tokens de Groq alcanzado")
+    creado = int(_time.time())
+    modelo = peticion.get("model") or "gisee"
+
+    if peticion.get("stream"):
+
+        async def eventos():
+            inicio = {
+                "id": "chatcmpl-gisee",
+                "object": "chat.completion.chunk",
+                "created": creado,
+                "model": modelo,
+                "choices": [{"index": 0, "delta": {"content": respuesta}, "finish_reason": None}],
+            }
+            fin = {
+                "id": "chatcmpl-gisee",
+                "object": "chat.completion.chunk",
+                "created": creado,
+                "model": modelo,
+                "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
+            }
+            yield f"data: {_json.dumps(inicio, ensure_ascii=False)}\n\n".encode()
+            yield f"data: {_json.dumps(fin, ensure_ascii=False)}\n\n".encode()
+            yield b"data: [DONE]\n\n"
+
+        return StreamingResponse(eventos(), media_type="text/event-stream")
+
+    return {
+        "id": "chatcmpl-gisee",
+        "object": "chat.completion",
+        "created": creado,
+        "model": modelo,
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": respuesta},
+                "finish_reason": "stop",
+            }
+        ],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
 @app.get("/", response_class=HTMLResponse)
 async def get_chat_page():
     with open("chat.html", "r", encoding="utf-8") as f:
         return f.read()
     
-# Importar el router del nuevo archivo
-from rutas_esp32 import router as router_esp32, inicializar_router
-
 # Pasarle la cadena y el historial al router para que los pueda usar
 inicializar_router(chain, historiales)
 
-# Conectar el router a la app principal de FastAPI
-app.include_router(router_esp32)
+# Conectar el router (ya importado arriba) a la app principal de FastAPI
+app.include_router(esp32_router)
 
 if __name__ == "__main__":
     import uvicorn

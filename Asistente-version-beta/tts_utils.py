@@ -5,7 +5,10 @@ def limpiar_texto_para_tts(texto: str) -> str:
     Limpia el texto antes de enviarlo al TTS para que suene natural.
     """
     
-    # 1. elimina emojis usando rangos unicode específicos
+    # 1. quita enlaces markdown: [texto](url) -> texto (no leer URLs)
+    texto = re.sub(r'\[([^\]]*)\]\([^)]*\)', r'\1', texto)
+
+    # elimina emojis usando rangos unicode específicos
     emoji_pattern = re.compile(
         "["
         "\U0001F600-\U0001F64F"  # emojis de caras
@@ -20,25 +23,25 @@ def limpiar_texto_para_tts(texto: str) -> str:
     texto = emoji_pattern.sub('', texto)
     
     # 2. cuando se refiere al USUARIO (ti mismo/a, tú mismo/a)
-    # lo reemplaza por la forma femenina porque Tina es mujer
-    texto = re.sub(r'\bti mismo/a\b', 'ti misma', texto, flags=re.IGNORECASE)
-    texto = re.sub(r'\btú mismo/a\b', 'tú misma', texto, flags=re.IGNORECASE)
-    texto = re.sub(r'\bmismo/a\b', 'misma', texto, flags=re.IGNORECASE)
-    texto = re.sub(r'\bél/ella\b', 'ella', texto, flags=re.IGNORECASE)
-    
+    # Gisee es un asistente masculino: usa las formas en -o
+    texto = re.sub(r'\bti mismo/a\b', 'ti mismo', texto, flags=re.IGNORECASE)
+    texto = re.sub(r'\btú mismo/a\b', 'tú mismo', texto, flags=re.IGNORECASE)
+    texto = re.sub(r'\bmismo/a\b', 'mismo', texto, flags=re.IGNORECASE)
+    texto = re.sub(r'\bél/ella\b', 'él', texto, flags=re.IGNORECASE)
+
     # 3. cuando se refiere a OTRA PERSONA (amigo/a, compañero/a, etc.)
     # lo expande a "amigo o amiga" para que suene natural al leerlo
     texto = re.sub(r'\bamigo/a\b', 'amigo o amiga', texto, flags=re.IGNORECASE)
     texto = re.sub(r'\bcompañero/a\b', 'compañero o compañera', texto, flags=re.IGNORECASE)
-    texto = re.sub(r'\bquerido/a\b', 'querida', texto, flags=re.IGNORECASE)
+    texto = re.sub(r'\bquerido/a\b', 'querido', texto, flags=re.IGNORECASE)
     texto = re.sub(r'\bchico/a\b', 'chico o chica', texto, flags=re.IGNORECASE)
     texto = re.sub(r'\bniño/a\b', 'niño o niña', texto, flags=re.IGNORECASE)
     texto = re.sub(r'\bnovio/a\b', 'novio o novia', texto, flags=re.IGNORECASE)
     texto = re.sub(r'\bhijo/a\b', 'hijo o hija', texto, flags=re.IGNORECASE)
-    
-    # 4. patrón genérico para cualquier palabra/a que no hayamos cubierto
-    # convierte "palabra/a" en "palabra o palabraa" — luego lo refinamos si aparece
-    texto = re.sub(r'(\w+)/a\b', r'\1 o \1a', texto)
+
+    # 4. patrón genérico para cualquier palabra/a que no hayamos cubierto.
+    # El TTS no debe leer la barra: nos quedamos con la forma sin "/a".
+    texto = re.sub(r'(\w+)/a\b', r'\1', texto)
     
     # 5. elimina asteriscos de markdown
     texto = re.sub(r'\*+', '', texto)

@@ -16,25 +16,26 @@ llm_juez = ChatGroq(
 prompt_juez = ChatPromptTemplate.from_messages([
     ("system", """Eres un evaluador de respuestas de un asistente emocional llamado Gisee.
     Tu única tarea es evaluar si la respuesta es segura y apropiada.
-    
-    Debes responder SOLO con un JSON con este formato exacto, sin texto adicional:
+
+    Responde SOLO con un JSON válido, sin markdown ni texto adicional:
     {{"aprobado": true, "razon": "explicación corta"}}
-    
-    Rechaza la respuesta (aprobado: false) si:
-    - Contiene información médica incorrecta o peligrosa 
+
+    Rechaza la respuesta (aprobado: false) SOLO si:
+    - Contiene información médica incorrecta o peligrosa
     - Sugiere hacerse daño o hacerle daño a otros
     - Inventa datos, estadísticas o citas falsas
-    - Es ofensiva, discriminatoria o inapropiada
-    - Contradice completamente lo que preguntó el usuario
-  <  
-01    - Es empática y apropiada para un asistente emocional
-    - No contiene información peligrosa
-    - Responde de forma coherente al usuario
+    - Es ofensiva, discriminatoria o claramente inapropiada
+
+    Aprueba la respuesta (aprobado: true) si es segura y empática, aunque sea
+    breve, informal, use humor o pida una aclaración. NO rechaces por estilo,
+    por no dar detalles, porque la respuesta no sea perfecta o porque no
+    resuelva del todo la pregunta: este es un asistente emocional y puede
+    conversar y preguntar antes de responder.
     """),
-    ("human", """
-     
+    ("human", """Mensaje del usuario: {mensaje_usuario}
+
     Respuesta de Gisee: {respuesta_gisee}
-    
+
     Evalúa esta respuesta:
     """),
 ])
@@ -43,9 +44,10 @@ chain_juez = prompt_juez | llm_juez | StrOutputParser()
 
 # mensaje de seguridad cuando la respuesta es rechazada
 MENSAJE_SEGURIDAD = (
-    "Lo siento, en este momento no puedo darte una respuesta adecuada sobre eso. "
-    "Te recomiendo hablar con un profesional de salud mental si estás pasando "
-    "por un momento difícil. Estoy aquí para escucharte."
+    "Vaya, prefiero no aventurarme con eso. Si te sientes en riesgo o muy mal, "
+    "no te quedes solo: avisa a alguien de confianza y llama al 123 o a la "
+    "línea de salud mental 106. Mientras tanto, cuéntame más; estoy aquí "
+    "para escucharte."
 )
 
 def evaluar_respuesta(mensaje_usuario: str, respuesta_gisee: str) -> str:
@@ -64,12 +66,20 @@ def evaluar_respuesta(mensaje_usuario: str, respuesta_gisee: str) -> str:
         })
 
         # parseamos el JSON que devuelve el juez
-        # limpiamos por si el LLM agrega texto extra
+        # limpiamos por si el LLM agrega markdown o texto extra
         resultado_limpio = resultado.strip()
         if "```" in resultado_limpio:
-            resultado_limpio = resultado_limpio.split("```")[1]
-            if resultado_limpio.startswith("json"):
+            partes = resultado_limpio.split("```")
+            if len(partes) >= 2:
+                resultado_limpio = partes[1]
+            if resultado_limpio.lower().startswith("json"):
                 resultado_limpio = resultado_limpio[4:]
+
+        # nos quedamos con el objeto JSON aunque haya texto alrededor
+        inicio = resultado_limpio.find("{")
+        fin = resultado_limpio.rfind("}")
+        if inicio != -1 and fin > inicio:
+            resultado_limpio = resultado_limpio[inicio:fin + 1]
 
         evaluacion = json.loads(resultado_limpio)
 
