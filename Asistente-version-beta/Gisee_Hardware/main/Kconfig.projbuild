@@ -1,0 +1,46 @@
+menu "Gisee (voz de la IA)"
+
+    config GISEE_WIFI_SSID
+        string "SSID del WiFi"
+        default "Main Vayne"
+        help
+            Red a la que se conecta el ESP32-P4 (a través del ESP32-C6 esclavo).
+
+    config GISEE_WIFI_PASSWORD
+        string "Contraseña del WiFi"
+        default "megustaelcafenegro123*"
+        help
+            Déjala vacía para redes abiertas.
+
+    config GISEE_SERVER_URL
+        string "URL base del servidor FastAPI"
+        default "http://192.168.20.24:8000"
+        help
+            Sin la ruta. A esta base se le añade /tts y /chat/audio.
+
+    config GISEE_PA_GPIO
+        int "GPIO del amplificador NS4150 (-1 = lo maneja el BSP)"
+        default 11
+        range -1 54
+        help
+            En la JC-ESP32P4-M3-DEV el PA_CTRL del NS4150 va al GPIO11
+            (pin 15 del módulo), no al GPIO53 que usa la BSP de la
+            ESP32-P4-Function-EV-Board. Deja 11.
+
+            El I2S se configura aparte con el pinout real: DIN = GPIO48
+            (ASDOUT del ES8311). Poner -1 aquí desactiva el control manual
+            del PA y solo serviría si se parcheara la BSP.
+
+    config GISEE_VOLUME
+        int "Volumen (0-100)"
+        default 80
+        range 0 100
+
+    config GISEE_CHAT_FIELD
+        string "Campo JSON del mensaje para /chat/audio"
+        default "MensajeUsuario"
+        help
+            Nombre del campo que espera el endpoint /chat/audio del servidor
+            (debe coincidir con el modelo Pydantic de tu /chat).
+
+endmenu

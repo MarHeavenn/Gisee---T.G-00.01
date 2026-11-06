@@ -1,0 +1,11 @@
+## IDF Component Manager Manifest File
+dependencies:
+  idf: ">=5.4"
+  # cJSON ya no viene con ESP-IDF 6.x: vive en el registro de componentes
+  espressif/cjson: "^1.7.19"
+  # Misma BSP y codecs que el reproductor MP3 de referencia de la placa
+  espressif/esp32_p4_function_ev_board: "^5.2.3"
+  espressif/esp_codec_dev: "^1.4.0"
+  espressif/esp_audio_codec: "*"
+  # WiFi vía el ESP32-C6 esclavo (ESP-Hosted por SDIO)
+  espressif/esp_wifi_remote: "^1.5.0"

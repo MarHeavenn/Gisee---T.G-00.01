@@ -1,0 +1,17 @@
+# Artefactos de compilación de ESP-IDF
+build/
+managed_components/
+
+# Configuraciones de respaldo y registros
+sdkconfig.old
+*.log
+
+# Caché de Python del servidor de prueba
+__pycache__/
+*.pyc
+
+# Archivos de proyecto generados por el IDE
+.project
+.cproject
+.settings/
+.vscode/
