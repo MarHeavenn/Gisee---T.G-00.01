@@ -1,6 +1,9 @@
 import os
 import io
+import re
+import difflib
 import tempfile
+import unicodedata
 from fastapi import APIRouter, UploadFile, File, Form, Response, HTTPException, Request
 from fastapi.concurrency import run_in_threadpool
 from pydantic import BaseModel
@@ -248,6 +251,78 @@ async def esp32_stt(request: Request):
     texto = await run_in_threadpool(_transcribir_bytes, audio, suffix)
     print(f"[ESP32] Transcripción: {texto!r}")
     return {"texto": texto}
+
+
+# ---------------------------------------------------------------------------
+# Activación por voz: "hola Gisee"
+# ---------------------------------------------------------------------------
+# La placa no tiene un modelo WakeNet en español, así que la detección se hace
+# aquí: el firmware manda un fragmento de voz cuando detecta que alguien habló
+# y el servidor comprueba si dijo el nombre. Whisper transcribe "Gisee" de
+# formas muy distintas ("Gisí", "Yisee", "Giselle"...), por eso comparamos por
+# similitud en vez de exigir la palabra exacta.
+
+_SALUDOS_WAKE = {"hola", "oye", "hey", "ey", "buenas", "buenos", "dias", "tardes", "noches"}
+
+# Whisper transcribe el nombre de muchas formas. Estas son las más comunes en
+# español; el resto se resuelve por similitud.
+_VARIANTES_WAKE = {
+    "gisee", "gise", "gisi", "gisy", "gisse", "giseel", "gizee", "gize",
+    "yisee", "yisi", "jisee", "jisi", "gicee", "giselle", "gisela",
+}
+
+
+def _normalizar(texto: str) -> str:
+    """Minúsculas, sin tildes y sin signos, para comparar la frase de activación."""
+    t = unicodedata.normalize("NFKD", (texto or "").lower())
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    t = re.sub(r"[^a-z0-9ñ ]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _parece_gisee(palabra: str) -> bool:
+    if palabra in _VARIANTES_WAKE:
+        return True
+    if 5 <= len(palabra) <= 8:
+        return difflib.SequenceMatcher(None, palabra, "gisee").ratio() >= 0.8
+    return False
+
+
+def _detectar_activacion(texto: str):
+    """Devuelve (activado, resto): qué dijo la persona después del nombre."""
+    palabras = _normalizar(texto).split()
+    for i, palabra in enumerate(palabras):
+        if _parece_gisee(palabra):
+            resto = [w for w in palabras[i + 1:] if w not in _SALUDOS_WAKE]
+            return True, " ".join(resto)
+    return False, ""
+
+
+@router.post("/wake")
+async def esp32_wake(request: Request):
+    """Detecta "hola Gisee" en el fragmento de voz que manda la placa.
+
+    Devuelve {"wake": bool, "texto": "...", "resto": "..."}, donde `resto` es
+    lo dicho después del nombre: si la persona dijo "hola Gisee, me siento
+    triste" se responde directo, sin volver a preguntarle qué quiere.
+    """
+    content_type = request.headers.get("content-type", "")
+    if content_type.startswith("multipart/form-data"):
+        formulario = await request.form()
+        archivo = formulario.get("audio") or formulario.get("file")
+        if archivo is None:
+            raise HTTPException(status_code=400, detail="Falta el archivo 'audio'")
+        audio = await archivo.read()
+    else:
+        audio = await request.body()
+
+    if not audio:
+        raise HTTPException(status_code=400, detail="El audio llegó vacío")
+
+    texto = await run_in_threadpool(_transcribir_bytes, audio, ".wav")
+    activado, resto = _detectar_activacion(texto)
+    print(f"[ESP32] /wake: {texto!r} -> {'ACTIVADO' if activado else 'sin activación'}")
+    return {"wake": activado, "texto": texto, "resto": resto}
 
 
 @router.post("/tts")

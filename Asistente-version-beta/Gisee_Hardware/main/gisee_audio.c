@@ -235,15 +235,20 @@ void gisee_audio_mic_close(void)
 /* STT: envía un WAV al servidor y devuelve el texto transcrito              */
 /* ------------------------------------------------------------------------- */
 
-esp_err_t gisee_stt(const uint8_t *wav, size_t wav_len, char *texto, size_t texto_cap)
+/* Envía un WAV a `ruta` y deja la respuesta JSON cruda en `resp`. */
+static esp_err_t enviar_wav(const char *ruta, const uint8_t *wav, size_t wav_len,
+                            char *resp, size_t resp_cap)
 {
-    if (texto == NULL || texto_cap == 0) {
+    if (wav == NULL || resp == NULL || resp_cap == 0) {
         return ESP_ERR_INVALID_ARG;
     }
-    texto[0] = '\0';
+    resp[0] = '\0';
+
+    char url[192];
+    snprintf(url, sizeof(url), "%s%s", CONFIG_GISEE_SERVER_URL, ruta);
 
     esp_http_client_config_t cfg = {
-        .url = CONFIG_GISEE_SERVER_URL "/stt",
+        .url = url,
         .method = HTTP_METHOD_POST,
         .timeout_ms = 30000,
         .buffer_size = 2048,
@@ -254,10 +259,9 @@ esp_err_t gisee_stt(const uint8_t *wav, size_t wav_len, char *texto, size_t text
     }
     esp_http_client_set_header(http, "Content-Type", "audio/wav");
 
-    esp_err_t ret = ESP_OK;
-    ret = esp_http_client_open(http, (int)wav_len);
+    esp_err_t ret = esp_http_client_open(http, (int)wav_len);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "No se pudo conectar a /stt: %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "No se pudo conectar a %s: %s", ruta, esp_err_to_name(ret));
         esp_http_client_cleanup(http);
         return ret;
     }
@@ -278,27 +282,42 @@ esp_err_t gisee_stt(const uint8_t *wav, size_t wav_len, char *texto, size_t text
     }
 
     if (esp_http_client_fetch_headers(http) < 0) {
-        ESP_LOGE(TAG, "Sin cabeceras de /stt");
+        ESP_LOGE(TAG, "Sin cabeceras de %s", ruta);
         esp_http_client_cleanup(http);
         return ESP_FAIL;
     }
     if (esp_http_client_get_status_code(http) != 200) {
-        ESP_LOGE(TAG, "/stt respondió HTTP %d", esp_http_client_get_status_code(http));
+        ESP_LOGE(TAG, "%s respondió HTTP %d", ruta, esp_http_client_get_status_code(http));
         esp_http_client_cleanup(http);
         return ESP_FAIL;
     }
 
-    char *resp = malloc(1024);
-    if (resp == NULL) {
-        esp_http_client_cleanup(http);
-        return ESP_ERR_NO_MEM;
-    }
     int total = 0, n;
-    while ((n = esp_http_client_read(http, resp + total, 1023 - total)) > 0) {
+    while (total < (int)resp_cap - 1 &&
+           (n = esp_http_client_read(http, resp + total, (int)resp_cap - 1 - total)) > 0) {
         total += n;
     }
     resp[total] = '\0';
     esp_http_client_cleanup(http);
+    return (total > 0) ? ESP_OK : ESP_FAIL;
+}
+
+esp_err_t gisee_stt(const uint8_t *wav, size_t wav_len, char *texto, size_t texto_cap)
+{
+    if (texto == NULL || texto_cap == 0) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    texto[0] = '\0';
+
+    char *resp = malloc(1536);
+    if (resp == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    esp_err_t ret = enviar_wav("/stt", wav, wav_len, resp, 1536);
+    if (ret != ESP_OK) {
+        free(resp);
+        return ret;
+    }
 
     cJSON *root = cJSON_Parse(resp);
     if (root == NULL) {
@@ -318,6 +337,49 @@ esp_err_t gisee_stt(const uint8_t *wav, size_t wav_len, char *texto, size_t text
     cJSON_Delete(root);
     free(resp);
     return ret;
+}
+
+esp_err_t gisee_wake(const uint8_t *wav, size_t wav_len,
+                     char *texto, size_t texto_cap,
+                     char *resto, size_t resto_cap,
+                     bool *activado)
+{
+    if (texto == NULL || resto == NULL || activado == NULL) {
+        return ESP_ERR_INVALID_ARG;
+    }
+    texto[0] = '\0';
+    resto[0] = '\0';
+    *activado = false;
+
+    char *resp = malloc(2048);
+    if (resp == NULL) {
+        return ESP_ERR_NO_MEM;
+    }
+    esp_err_t ret = enviar_wav("/wake", wav, wav_len, resp, 2048);
+    if (ret != ESP_OK) {
+        free(resp);
+        return ret;
+    }
+
+    cJSON *root = cJSON_Parse(resp);
+    if (root == NULL) {
+        ESP_LOGE(TAG, "Respuesta de /wake no es JSON: %.80s", resp);
+        free(resp);
+        return ESP_FAIL;
+    }
+    const cJSON *w = cJSON_GetObjectItem(root, "wake");
+    *activado = cJSON_IsTrue(w);
+    const cJSON *t = cJSON_GetObjectItem(root, "texto");
+    if (cJSON_IsString(t)) {
+        strlcpy(texto, t->valuestring, texto_cap);
+    }
+    const cJSON *r = cJSON_GetObjectItem(root, "resto");
+    if (cJSON_IsString(r)) {
+        strlcpy(resto, r->valuestring, resto_cap);
+    }
+    cJSON_Delete(root);
+    free(resp);
+    return ESP_OK;
 }
 
 

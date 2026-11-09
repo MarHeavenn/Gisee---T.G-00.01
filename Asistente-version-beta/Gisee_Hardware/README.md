@@ -16,7 +16,7 @@ ESP32-P4  --(WiFi por el C6, ESP-Hosted)-->  FastAPI (Groq + RAG + edge-tts)
 
 | Archivo              | Qué hace                                                              |
 |----------------------|-----------------------------------------------------------------------|
-| `main/main.c`        | NVS, arranque de audio/red y tarea principal + botón BOOT (GPIO35)     |
+| `main/main.c`        | NVS, arranque de audio/red, escucha «hola Gisee», botón BOOT (GPIO35) y conversación |
 | `main/gisee_audio.c` | Codec ES8311, PA NS4150 (PA_CTRL = GPIO11), I2S con pinout real (DIN = GPIO48) y decodificador MP3 simple en streaming |
 | `main/gisee_net.c`   | WiFi en modo estación con reconexión automática                       |
 | `main/Kconfig.projbuild` | Configuración (menuconfig → "Gisee")                              |
@@ -64,6 +64,29 @@ son correctos dirá "Hola, soy Gisee. Ya estoy listo para acompañarte. Cuéntam
 - **toque corto mientras habla** → corta la reproducción
 
 Los gestos están en orden: si no suena nada, primero prueba el pitido sin red.
+
+## Activación por voz («hola Gisee»)
+
+Ya no hace falta pulsar el botón:
+
+1. La placa escucha en segundo plano. Cuando detecta que alguien habló, graba
+   la frase (hasta 6 s) y la manda a `POST /wake`.
+2. El servidor la transcribe con Whisper y comprueba si dijiste el nombre.
+3. Si lo dijiste, Gisee contesta «¿Sí? Te escucho.» y graba tu siguiente frase,
+   que responde por `/chat/audio`.
+4. Si el mensaje ya venía en la misma frase («hola Gisee, me siento triste»),
+   responde directo sin volver a preguntar.
+
+El botón BOOT sigue funcionando como respaldo y para cortar la reproducción.
+
+La sensibilidad se ajusta en `idf.py menuconfig` → **Gisee** → *Sensibilidad de
+la voz para «hola Gisee»* (`CONFIG_GISEE_WAKE_RMS`): súbelo si se activa sola
+con ruido de fondo, bájalo si no te escucha.
+
+> **WiFi de 2.4 GHz:** el ESP32-C6 solo conecta a redes de 2.4 GHz. Si el punto
+> de acceso es de 5 GHz la placa no lo verá (`reason=201`, `rssi=-128`). El PC y
+> la placa deben estar en la misma red, y `CONFIG_GISEE_SERVER_URL` tiene que
+> apuntar a la IP del PC (por ejemplo `http://192.168.40.12:8000`).
 
 ## Si no se oye nada (diagnóstico)
 

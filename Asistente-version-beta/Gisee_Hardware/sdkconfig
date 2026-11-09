@@ -1316,17 +1316,19 @@ CONFIG_PARTITION_TABLE_MD5=y
 # Gisee (voz de la IA)
 #
 # default:
-CONFIG_GISEE_WIFI_SSID="Main Vayne"
+CONFIG_GISEE_WIFI_SSID="FAMILIA_CANON"
 # default:
-CONFIG_GISEE_WIFI_PASSWORD="megustaelcafenegro123*"
+CONFIG_GISEE_WIFI_PASSWORD="@D2a6n3i8e0l7@."
 # default:
-CONFIG_GISEE_SERVER_URL="http://192.168.20.24:8000"
+CONFIG_GISEE_SERVER_URL="http://192.168.40.12:8000"
 # default:
 CONFIG_GISEE_PA_GPIO=11
 # default:
 CONFIG_GISEE_VOLUME=80
 # default:
 CONFIG_GISEE_CHAT_FIELD="MensajeUsuario"
+# default:
+CONFIG_GISEE_WAKE_RMS=500
 # end of Gisee (voz de la IA)
 
 #

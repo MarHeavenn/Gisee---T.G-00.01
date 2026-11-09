@@ -2,19 +2,19 @@ menu "Gisee (voz de la IA)"
 
     config GISEE_WIFI_SSID
         string "SSID del WiFi"
-        default "Main Vayne"
+        default "FAMILIA_CANON"
         help
             Red a la que se conecta el ESP32-P4 (a través del ESP32-C6 esclavo).
 
     config GISEE_WIFI_PASSWORD
         string "Contraseña del WiFi"
-        default "megustaelcafenegro123*"
+        default "@D2a6n3i8e0l7@."
         help
             Déjala vacía para redes abiertas.
 
     config GISEE_SERVER_URL
         string "URL base del servidor FastAPI"
-        default "http://192.168.20.24:8000"
+        default "http://192.168.40.12:8000"
         help
             Sin la ruta. A esta base se le añade /tts y /chat/audio.
 
@@ -42,5 +42,14 @@ menu "Gisee (voz de la IA)"
         help
             Nombre del campo que espera el endpoint /chat/audio del servidor
             (debe coincidir con el modelo Pydantic de tu /chat).
+
+    config GISEE_WAKE_RMS
+        int "Sensibilidad de la voz para «hola Gisee» (RMS)"
+        default 500
+        range 100 8000
+        help
+            Nivel mínimo de energía (RMS de muestras de 16 bits) para
+            considerar que alguien está hablando. Súbelo si la placa se
+            activa sola con ruido de fondo; bájalo si no te escucha.
 
 endmenu

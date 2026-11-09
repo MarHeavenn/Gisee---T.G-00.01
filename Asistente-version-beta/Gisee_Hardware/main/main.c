@@ -3,18 +3,28 @@
  *
  *   ESP32-P4  --(WiFi)-->  FastAPI (Whisper + Groq + RAG)  --> MP3 (TTS)
  *      ^                        ^                                 |
- *      +--- mic SIEMPRE en "push-to-talk" (WAV en streaming) ------+
+ *      +--- mic: voz ("hola Gisee") o botón BOOT ----------------+
  *
- * Botón BOOT (GPIO35):
+ * Activación por voz:
+ *   - La placa espera callada. Cuando detecta que alguien empezó a hablar,
+ *     graba hasta que se hace silencio y manda ese fragmento a /wake.
+ *   - Si el servidor reconoce "hola Gisee", Gisee contesta "¿Sí? Te escucho."
+ *     y graba la siguiente frase para responderla con /chat/audio.
+ *   - Si en la misma frase ya venía el mensaje ("hola Gisee, me siento
+ *     triste"), se responde directo sin volver a preguntar.
+ *
+ * Botón BOOT (GPIO35), se mantiene como respaldo:
  *   - mantener pulsado  : graba tu voz por el micrófono (hasta 10 s)
  *   - al soltar         : WAV -> /stt (Whisper), texto -> /chat/audio
- *                         (Groq + RAG) -> respuesta MP3 por la bocina
  *   - toque corto en    : corta la reproducción en curso
  *     pleno de playback
  */
 
 #include <string.h>
 #include <stdint.h>
+#include <stdlib.h>
+#include <math.h>
+
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
@@ -29,12 +39,29 @@
 #define TAG                 "gisee"
 #define BUTTON_GPIO         GPIO_NUM_35
 #define REC_RATE            16000
-#define REC_MAX_MS          10000      /* grabación máxima */
+#define REC_MAX_MS          10000      /* grabación máxima con el botón */
 #define REC_BUF_FRAMES_MAX  (REC_RATE * REC_MAX_MS / 1000)
 #define CHUNK               1024
 #define WAV_HDR             44
 
+/* --- Detección de voz para "hola Gisee" --------------------------------- */
+#define VAD_FRAME_MS        20
+#define VAD_FRAME_BYTES     (REC_RATE * VAD_FRAME_MS / 1000 * 2)   /* 640 */
+#define VAD_PREROLL_MS      400
+#define VAD_PREROLL_FRAMES  (VAD_PREROLL_MS / VAD_FRAME_MS)
+#define VAD_SILENCIO_MS     700        /* silencio que cierra la frase */
+#define VAD_SILENCIO_FRAMES (VAD_SILENCIO_MS / VAD_FRAME_MS)
+#define VAD_MIN_MS          350        /* menos que esto: ruido, se descarta */
+#define VAD_MAX_MS          6000       /* frase máxima que se envía a /wake */
+#define VAD_PCM_BYTES       (REC_RATE * VAD_MAX_MS / 1000 * 2)
+#define VAD_ESPERA_MAX_MS   15000      /* sin voz: revisar red/botón y seguir */
+
+#ifndef CONFIG_GISEE_WAKE_RMS
+#define CONFIG_GISEE_WAKE_RMS 500
+#endif
+
 static TaskHandle_t s_gisee_task;
+static volatile bool s_btn_grabar;     /* el botón pide una grabación manual */
 
 static bool btn_down(void)
 {
@@ -73,7 +100,133 @@ static void wav_header(uint8_t *h, uint32_t rate, uint16_t bits, uint16_t ch, ui
     put_u32le(h + 40, data_len);
 }
 
-/* Push-to-talk: graba y reproduce la respuesta de la IA. */
+/* Energía de un frame de 20 ms, para distinguir voz de silencio. */
+static int frame_rms(const uint8_t *frame, int bytes)
+{
+    const int16_t *s = (const int16_t *)(const void *)frame;
+    int n = bytes / 2;
+    if (n <= 0) {
+        return 0;
+    }
+    int64_t suma = 0;
+    for (int i = 0; i < n; i++) {
+        int32_t v = s[i];
+        suma += (int64_t)v * v;
+    }
+    return (int)sqrt((double)(suma / n));
+}
+
+/*
+ * Graba automáticamente una frase: espera a que haya voz, la captura y
+ * termina cuando la persona se calla. Devuelve los bytes PCM grabados
+ * (0 si no hubo voz, si se canceló o si el botón tomó el control).
+ *
+ * El ruido de fondo se mide solo y el umbral sube con él, para que un
+ * ventilador o el aire acondicionado no disparen la escucha en bucle.
+ */
+static size_t grabar_voz(uint8_t *pcm, size_t pcm_cap, volatile bool *cancelar)
+{
+    const size_t pre_bytes = (size_t)VAD_PREROLL_FRAMES * VAD_FRAME_BYTES;
+    uint8_t *pre = heap_caps_malloc(pre_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (pre == NULL) {
+        ESP_LOGE(TAG, "Sin PSRAM para el pre-roll de voz");
+        return 0;
+    }
+
+    uint8_t frame[VAD_FRAME_BYTES];
+    size_t total = 0;
+    int ruido = CONFIG_GISEE_WAKE_RMS / 4;
+    int umbral = CONFIG_GISEE_WAKE_RMS;
+    int silencio = 0;
+    int arranque = 0;
+    int esperando = 0;
+    int pre_count = 0;
+    int pre_idx = 0;
+    bool grabando = false;
+
+    if (ruido < 100) {
+        ruido = 100;
+    }
+
+    while (true) {
+        if (cancelar != NULL && *cancelar) {
+            break;
+        }
+
+        int n = gisee_audio_mic_read_mono16(frame, VAD_FRAME_BYTES);
+        if (n <= 0) {
+            ESP_LOGW(TAG, "El micrófono dejó de entregar audio");
+            break;
+        }
+
+        int rms = frame_rms(frame, n);
+
+        /* Guardar siempre el último medio segundo: cuando empiece la voz,
+         * el "hola" no se pierde por haber llegado antes del disparo. */
+        memcpy(pre + (size_t)pre_idx * VAD_FRAME_BYTES, frame, VAD_FRAME_BYTES);
+        pre_idx = (pre_idx + 1) % VAD_PREROLL_FRAMES;
+        if (pre_count < VAD_PREROLL_FRAMES) {
+            pre_count++;
+        }
+
+        if (!grabando) {
+            if (++esperando > (VAD_ESPERA_MAX_MS / VAD_FRAME_MS)) {
+                break;                                  /* sin voz: vuelve al loop */
+            }
+            if (rms < umbral) {
+                ruido = (ruido * 31 + rms) / 32;
+                int nuevo = ruido * 3;
+                umbral = nuevo > CONFIG_GISEE_WAKE_RMS ? nuevo : CONFIG_GISEE_WAKE_RMS;
+                arranque = 0;
+                continue;
+            }
+            if (++arranque < 3) {
+                continue;                               /* 60 ms seguidos de voz */
+            }
+
+            int inicio = (pre_idx - pre_count + VAD_PREROLL_FRAMES) % VAD_PREROLL_FRAMES;
+            for (int i = 0; i < pre_count && total < pcm_cap; i++) {
+                int idx = (inicio + i) % VAD_PREROLL_FRAMES;
+                size_t copiar = VAD_FRAME_BYTES;
+                if (total + copiar > pcm_cap) {
+                    copiar = pcm_cap - total;
+                }
+                memcpy(pcm + total, pre + (size_t)idx * VAD_FRAME_BYTES, copiar);
+                total += copiar;
+            }
+            grabando = true;
+            silencio = 0;
+            ESP_LOGI(TAG, "Voz detectada: grabando la frase...");
+            continue;                                   /* el frame ya está en el pre-roll */
+        }
+
+        if (total + (size_t)n <= pcm_cap) {
+            memcpy(pcm + total, frame, (size_t)n);
+            total += (size_t)n;
+        }
+
+        if (rms >= umbral) {
+            silencio = 0;
+        } else if (++silencio >= VAD_SILENCIO_FRAMES) {
+            break;                                      /* se calló: frase completa */
+        }
+
+        if (total >= pcm_cap) {
+            break;
+        }
+    }
+
+    gisee_audio_mic_close();
+    heap_caps_free(pre);
+
+    size_t minimo = (size_t)(REC_RATE * VAD_MIN_MS / 1000 * 2);
+    if (total < minimo) {
+        return 0;
+    }
+    return total;
+}
+
+/* Push-to-talk: graba mientras el botón esté pulsado y reproduce la respuesta. */
 static void record_and_reply(void)
 {
     const size_t pcm_cap = (size_t)REC_BUF_FRAMES_MAX * 2;
@@ -128,6 +281,86 @@ static void record_and_reply(void)
     }
 }
 
+/* Escucha una frase y pregunta al servidor si dijo "hola Gisee".
+ * Si la dijo, deja en `resto` lo que vino después del nombre. */
+static bool esperar_activacion(uint8_t *pcm, size_t pcm_cap,
+                               char *resto, size_t resto_cap)
+{
+    size_t have = grabar_voz(pcm + WAV_HDR, pcm_cap, &s_btn_grabar);
+    if (have == 0) {
+        return false;
+    }
+
+    wav_header(pcm, REC_RATE, 16, 1, (uint32_t)have);
+    char texto[512];
+    bool activado = false;
+    esp_err_t r = gisee_wake(pcm, have + WAV_HDR, texto, sizeof(texto),
+                             resto, resto_cap, &activado);
+    if (r != ESP_OK || !activado) {
+        return false;
+    }
+    ESP_LOGI(TAG, "Dijiste: \"%s\" -> activado", texto);
+    return true;
+}
+
+/* Bucle principal: espera "hola Gisee", escucha la pregunta y responde. */
+static void conversacion(void)
+{
+    uint8_t *pcm = heap_caps_malloc(VAD_PCM_BYTES + WAV_HDR,
+                                    MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
+    if (pcm == NULL) {
+        ESP_LOGE(TAG, "Sin PSRAM para escuchar");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        return;
+    }
+
+    while (true) {
+        if (s_btn_grabar) {                       /* el botón tiene prioridad */
+            s_btn_grabar = false;
+            record_and_reply();
+            continue;
+        }
+        if (!gisee_net_is_connected()) {
+            ESP_LOGW(TAG, "Sin red: reintentando...");
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            continue;
+        }
+
+        char resto[512];
+        resto[0] = '\0';
+        if (!esperar_activacion(pcm, VAD_PCM_BYTES, resto, sizeof(resto))) {
+            continue;                             /* no dijo el nombre: a seguir oyendo */
+        }
+
+        if (resto[0] != '\0') {
+            /* Ya venía el mensaje en la misma frase: responder directo. */
+            ESP_LOGI(TAG, "Mensaje en el saludo: \"%s\"", resto);
+            if (gisee_chat(resto) != ESP_OK) {
+                gisee_audio_beep(300, 300);
+            }
+        } else {
+            gisee_say("¿Sí? Te escucho.");
+            ESP_LOGI(TAG, "Esperando la pregunta...");
+
+            size_t have = grabar_voz(pcm + WAV_HDR, VAD_PCM_BYTES, &s_btn_grabar);
+            if (have > 0) {
+                wav_header(pcm, REC_RATE, 16, 1, (uint32_t)have);
+                char texto[512];
+                if (gisee_stt(pcm, have + WAV_HDR, texto, sizeof(texto)) == ESP_OK &&
+                    texto[0] != '\0') {
+                    ESP_LOGI(TAG, "Pregunta: \"%s\"", texto);
+                    if (gisee_chat(texto) != ESP_OK) {
+                        gisee_audio_beep(300, 300);
+                    }
+                }
+            }
+        }
+
+        /* Pausa para no capturar el eco de la propia bocina. */
+        vTaskDelay(pdMS_TO_TICKS(400));
+    }
+}
+
 static void gisee_task(void *arg)
 {
     (void)arg;
@@ -140,15 +373,7 @@ static void gisee_task(void *arg)
                   "Cuéntame, ¿cómo te sientes hoy?");
     }
 
-    while (true) {
-        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);          /* espera pulsación */
-        if (!gisee_net_is_connected()) {
-            ESP_LOGW(TAG, "Sin red");
-            gisee_audio_beep(300, 300);
-            continue;
-        }
-        record_and_reply();
-    }
+    conversacion();
 }
 
 static void button_task(void *arg)
@@ -166,7 +391,7 @@ static void button_task(void *arg)
                     if (gisee_audio_is_playing()) {
                         gisee_audio_stop();
                     } else {
-                        xTaskNotifyGive(s_gisee_task);
+                        s_btn_grabar = true;
                     }
                 }
                 last = level;
@@ -210,6 +435,6 @@ void app_main(void)
 
     ESP_ERROR_CHECK(gisee_net_start(CONFIG_GISEE_WIFI_SSID, CONFIG_GISEE_WIFI_PASSWORD));
 
-    xTaskCreate(gisee_task, "gisee", 12288, NULL, 5, &s_gisee_task);
+    xTaskCreate(gisee_task, "gisee", 16384, NULL, 5, &s_gisee_task);
     xTaskCreate(button_task, "gisee_btn", 2048, NULL, 3, NULL);
 }

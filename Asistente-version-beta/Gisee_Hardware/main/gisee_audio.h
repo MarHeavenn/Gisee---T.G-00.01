@@ -28,6 +28,14 @@ void gisee_audio_mic_close(void);
  * transcrito se copia en `texto` (capacidad `texto_cap`). */
 esp_err_t gisee_stt(const uint8_t *wav, size_t wav_len, char *texto, size_t texto_cap);
 
+/* POST /wake con un WAV corto: el servidor transcribe y comprueba si se dijo
+ * "hola Gisee". Deja en `texto` la transcripción, en `resto` lo dicho después
+ * del nombre y en `activado` si hay que despertar. */
+esp_err_t gisee_wake(const uint8_t *wav, size_t wav_len,
+                     char *texto, size_t texto_cap,
+                     char *resto, size_t resto_cap,
+                     bool *activado);
+
 /* Volumen 0..100. */
 void gisee_audio_set_volume(int volume);
 
